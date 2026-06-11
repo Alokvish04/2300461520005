@@ -489,3 +489,491 @@ WHERE notification_id = :notification_id
 ```
 
 These queries, combined with the schema and API design above, provide a complete end-to-end design for the notification platform required in Stage 1 and Stage 2.
+
+---
+
+# Stage 3 – Query Optimization and Indexing
+
+An earlier developer in the team chose a relational database for storage (MySQL or PostgreSQL or any other SQL database) about 3 months ago. The database has grown to 50,000 students and 5,000,000 notifications. The developer had written the query below, which is now performing slowly:
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+## Is this query accurate?
+
+Yes, the query is **logically accurate** for fetching unread notifications of a specific student. It correctly filters by `studentID` and `isRead = false`, and orders by recency.
+
+## Why is this slow?
+
+Reasons:
+
+1. **`SELECT *`** fetches all columns, increasing I/O and memory usage, especially when the table has many columns.
+2. **No suitable index** on `(studentID, isRead, createdAt)` forces a large scan over many rows.
+3. With 50,000 students and 5,000,000 notifications, this becomes a full table scan or large range scan.
+4. **`ORDER BY createdAt`** without an index on `createdAt` forces an extra sort step after filtering.
+5. No `LIMIT` is used, so the query may return all unread notifications for that student, which can be large.
+
+## What would you change?
+
+Improved query:
+
+```sql
+SELECT
+  id,
+  studentID,
+  isRead,
+  createdAt,
+  notificationType,
+  title,
+  message
+FROM notifications
+WHERE studentID = 1042
+  AND isRead = false
+ORDER BY createdAt ASC
+LIMIT 100;
+```
+
+Changes:
+
+- Select only needed columns instead of `SELECT *`.
+- Add `LIMIT 100` to avoid fetching all rows on every request; the backend will paginate.
+- This reduces I/O and memory usage.
+
+## Indexing strategy
+
+Instead of adding indexes on every column:
+
+- Add a **composite index**:
+
+  ```sql
+  CREATE INDEX idx_notifications_student_unread_created
+    ON notifications (studentID, isRead, createdAt);
+  ```
+
+This allows:
+
+- Fast filtering by `studentID` and `isRead`.
+- Direct ordering by `createdAt` without extra sort overhead.
+
+Adding indexes on every column:
+
+- Increases write cost (indexes must be updated on every INSERT/UPDATE).
+- Uses more disk space.
+- Can degrade performance for write-heavy operations.
+- Not effective if the query pattern is not aligned with the index.
+
+So, the advice to add indexes on every column is **not effective**.
+
+## Query: students with placement notification in last 7 days
+
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+  AND createdAt >= NOW() - INTERVAL '7 days';
+```
+
+Or in MySQL:
+
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+  AND createdAt >= NOW() - INTERVAL 7 DAY;
+```
+
+This query uses the `notificationType` column and `createdAt` for filtering, and will benefit from the composite index defined above if extended to include `notificationType`.
+
+---
+
+# Stage 4 – Performance Caching and Strategies
+
+Problem:  
+Notifications are being fetched on each page load for every student. The DB is getting overwhelmed, causing bad user experience.
+
+## Suggested solutions
+
+### 1. Use caching (Redis) for unread counts and recent notifications
+
+**Approach:**
+
+- Cache:
+  - Unread notification count per student.
+  - Recent notifications (e.g., last 20–50) for each student.
+- On each page load:
+  - First, check cache.
+  - If cache has data, return it.
+  - If cache misses, fetch from DB and update cache.
+
+**Tradeoffs:**
+
+- **Pros:**
+  - Reduces DB load significantly.
+  - Faster response times for repeated page loads.
+  - Can handle high traffic with many students.
+- **Cons:**
+  - Need to manage cache invalidation when notifications are created or read.
+  - Adds complexity (cache layer, TTL, consistency).
+  - Requires extra infrastructure (Redis).
+
+**Implementation sketch:**
+
+- Cache key: `unread_count:{studentID}`
+- Cache key: `notifications:{studentID}:{page}:{pageSize}`
+- TTL: e.g., 5–10 minutes, or invalidate on write (create/mark read/delete).
+
+### 2. Database optimization and pagination
+
+**Approach:**
+
+- Use the composite index from Stage 3.
+- Enforce pagination with `LIMIT` and `OFFSET`.
+- Avoid `SELECT *`.
+
+**Tradeoffs:**
+
+- **Pros:**
+  - Reduces DB scan cost.
+  - Works even without extra infrastructure.
+- **Cons:**
+  - Still requires DB queries for each request.
+  - Not sufficient alone for very high traffic.
+
+### 3. Asynchronous background jobs for heavy operations
+
+**Approach:**
+
+- Use background workers (e.g., Node.js workers, Python Celery, etc.) to:
+  - Precompute unread counts.
+  - Pre-fetch and cache recent notifications.
+  - Handle bulk operations (e.g., `notify_all`).
+
+**Tradeoffs:**
+
+- **Pros:**
+  - Reduces main request latency.
+  - Better for bulk notifications.
+- **Cons:**
+  - Adds complexity (message queues, job management).
+  - Need to handle failures and retries.
+
+### Recommended strategy
+
+Use a combination:
+
+- Add the composite index (Stage 3).
+- Cache unread counts and recent notifications with Redis.
+- Use background workers for heavy operations like `notify_all`.
+
+This gives the best balance of performance and scalability.
+
+---
+
+# Stage 5 – Reliable and Fast `notify_all` Pseudocode
+
+Original pseudocode:
+
+```python
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        send_email(student_id, message)  # calls Email API
+        save_to_db(student_id, message)  # DB insert
+        push_to_app(student_id, message) # real-time notification
+```
+
+## Shortcomings of this implementation
+
+1. **No error handling**:
+   - If `send_email` fails for some students, the loop continues but we don’t know or retry.
+2. **No logging**:
+   - No logs to track which students succeeded or failed.
+3. **No retries**:
+   - If email fails mid-way for 200 students, those students never get the email.
+4. **Sequential processing**:
+   - For 50,000 students, this is very slow.
+5. **No separation of concerns**:
+   - DB insert and email send are in the same loop; if one fails, we don’t know what to do.
+6. **Not scalable**:
+   - Not suitable for large batch notifications in real time.
+
+## What if `send_email` fails for 200 students midway?
+
+- Those 200 students don’t get the email.
+- We have no record of failure.
+- We don’t retry.
+
+## Redesign for reliability and speed
+
+### Key ideas
+
+- **Use a job queue** for email sending and in-app notifications.
+- **Separate DB insert from email send**:
+  - Save to DB first, so we have a record.
+  - Then enqueue email and in-app tasks.
+- **Use retries with logging** for email and in-app notifications.
+- **Process in batches**, not one-by-one.
+- **Use logging middleware** to track success/failure.
+
+## Revised pseudocode
+
+```python
+function notify_all(student_ids: array, message: string):
+    # Step 1: Save all notifications to DB first
+    for batch in batch(student_ids, size=1000):
+        for student_id in batch:
+            # Use logging middleware
+            logger.info("Creating notification for student", student_id=student_id)
+
+            save_to_db(
+                student_id=student_id,
+                message=message,
+                notification_type="PLACEMENT",
+                status="UNREAD"
+            )
+
+            # Enqueue email and in-app tasks
+            enqueue_email_task(student_id=student_id, message=message)
+            enqueue_inapp_task(student_id=student_id, message=message)
+
+    # Step 2: Background workers will process email and in-app tasks
+    # with retries and logging
+
+function enqueue_email_task(student_id: string, message: string):
+    logger.info("Enqueueing email task", student_id=student_id)
+    job_queue.enqueue(
+        job="send_email",
+        args={
+            "student_id": student_id,
+            "message": message
+        }
+        retry_count=3,
+        on_failure=lambda: logger.error("Email send failed", student_id=student_id)
+    )
+
+function enqueue_inapp_task(student_id: string, message: string):
+    logger.info("Enqueueing in-app task", student_id=student_id)
+    job_queue.enqueue(
+        job="push_to_app",
+        args={
+            "student_id": student_id,
+            "message": message
+        }
+        retry_count=3,
+        on_failure=lambda: logger.error("In-app push failed", student_id=student_id)
+    )
+```
+
+### Should DB save and email send happen together?
+
+- **No**, they should not happen together in the same synchronous call.
+- **Reasons:**
+  - Email sending is external and can fail; DB save should be reliable.
+  - Separating them allows:
+    - DB to be updated first, so we have a record.
+    - Email to be sent asynchronously via a queue with retries.
+  - This improves reliability and speed.
+
+---
+
+# Stage 6 – Priority Inbox (Top 10 Notifications)
+
+Goal:  
+Implement a Priority Inbox that always displays the top `n` most important unread notifications first (e.g., top 10).  
+Priority is determined by:
+
+- **Weight**: `placement > result > event`
+- **Recency**: newer notifications are more important
+
+You must:
+
+- Use the provided Notification API:
+  `GET http://4.224.186.213/evaluation-service/notifications`
+- Find the top 10 unread notifications.
+- Use your **logging middleware** extensively.
+- Write real code (not pseudocode).
+- Push code and screenshots to the same GitHub repo.
+- Explain your approach in this section.
+
+## Approach
+
+1. Fetch all notifications from the API.
+2. Filter only unread notifications.
+3. Assign a numeric priority score to each notification:
+   - Base weight:
+     - `placement`: 3
+     - `result`: 2
+     - `event`: 1
+   - Recency factor: use `createdAt` (e.g., timestamp) to boost newer notifications.
+4. Sort by score descending.
+5. Return top 10.
+
+### Example score formula
+
+```python
+priority_score = type_weight * (1 + recency_factor)
+```
+
+Where:
+
+- `type_weight` = 3 for `Placement`, 2 for `Result`, 1 for `Event`
+- `recency_factor` = some value based on `createdAt` (e.g., `timestamp / max_timestamp`)
+
+Alternatively, you can:
+
+- Sort first by type weight (placement, result, event), then by `createdAt` descending.
+
+## Python implementation example
+
+```python
+import requests
+from typing import List, Dict
+
+import logging
+from logging_utils import get_logger  # your logging middleware wrapper
+
+logger = get_logger("priority_inbox")
+
+def get_type_weight(notification_type: str) -> int:
+    """
+    Assign weight based on notification type.
+    placement > result > event
+    """
+    type_map = {
+        "Placement": 3,
+        "Result": 2,
+        "Event": 1,
+    }
+    return type_map.get(notification_type, 0)
+
+def fetch_notifications(api_url: str) -> List[Dict]:
+    """
+    Fetch notifications from the API.
+    Uses logging middleware for request logging.
+    """
+    logger.info("Fetching notifications from API", url=api_url)
+    response = requests.get(api_url)
+    if response.status_code != 200:
+        logger.error("API request failed", status_code=response.status_code, url=api_url)
+        raise RuntimeError(f"API request failed with status {response.status_code}")
+
+    logger.info("Successfully fetched notifications", count=len(response.json()))
+    return response.json()
+
+def compute_priority_score(notification: Dict) -> float:
+    """
+    Compute priority score based on type weight and recency.
+    """
+    type_weight = get_type_weight(notification.get("notificationType", ""))
+    created_at = notification.get("createdAt", "")
+
+    # Simple recency factor: convert to timestamp (you can adjust this)
+    # For simplicity, assume createdAt is in ISO format or timestamp.
+    # Here we use a dummy factor based on string length for demo;
+    # in real code, parse to datetime and compute timestamp.
+    import datetime
+    try:
+        dt = datetime.datetime.fromisoformat(created_at)
+        timestamp = dt.timestamp()
+    except Exception as e:
+        logger.warning("Failed to parse createdAt", createdAt=created_at, error=str(e))
+        timestamp = 0
+
+    # Normalize timestamp (example: assume max timestamp is ~now)
+    max_timestamp = datetime.datetime.now().timestamp()
+    recency_factor = timestamp / max_timestamp if max_timestamp > 0 else 0
+
+    priority_score = type_weight * (1 + recency_factor)
+    return priority_score
+
+def get_top_n_unread_notifications(
+    notifications: List[Dict],
+    n: int = 10
+) -> List[Dict]:
+    """
+    Filter unread notifications, compute priority score,
+    sort by score descending, and return top n.
+    """
+    logger.info("Filtering unread notifications")
+    unread = [
+        nb for nb in notifications
+        if nb.get("isRead") is False
+    ]
+    logger.info("Filtered unread notifications", count=len(unread))
+
+    for nb in unread:
+        nb["_priority_score"] = compute_priority_score(nb)
+
+    logger.info("Sorting notifications by priority score")
+    sorted_notifications = sorted(
+        unread,
+        key=lambda nb: nb["_priority_score"],
+        reverse=True
+    )
+
+    top_n = sorted_notifications[:n]
+    logger.info("Selected top N notifications", n=n, count=len(top_n))
+    return top_n
+
+def main():
+    api_url = "http://4.224.186.213/evaluation-service/notifications"
+    logger.info("Starting Priority Inbox")
+
+    notifications = fetch_notifications(api_url)
+    top_10 = get_top_n_unread_notifications(notifications, n=10)
+
+    logger.info("Top 10 unread priority notifications:")
+    for i, nb in enumerate(top_10, start=1):
+        logger.info(
+            f"#{i}",
+            id=nb.get("id"),
+            title=nb.get("title"),
+            type=nb.get("notificationType"),
+            priority_score=nb["_priority_score"],
+            createdAt=nb.get("createdAt")
+        )
+
+    return top_10
+
+if __name__ == "__main__":
+    main()
+```
+
+## Maintaining top 10 efficiently as new notifications come in
+
+Options:
+
+1. **Recompute on each request**:
+   - Fetch all, filter unread, compute score, sort, and take top 10.
+   - Simple, but may be slow if there are many notifications.
+
+2. **Cache top 10**:
+   - Cache the top 10 unread notifications in Redis.
+   - Invalidate or update cache when:
+     - A new notification is created.
+     - A notification is marked as read/deleted.
+   - This is more efficient for high read volume.
+
+3. **Use a sorted data structure**:
+   - Use a sorted set (e.g., Redis Sorted Set) keyed by priority score.
+   - Insert new notifications with their score.
+   - Query top N in O(log N).
+
+For this assignment, recomputing on each request is acceptable, but you can mention caching as an optimization.
+
+## Files to push
+
+- `priority_inbox.py` (or `.js`, `.ts`, etc.) – your code file.
+- Screenshots showing the top 10 priority notifications printed/displayed.
+
+Update your `notification_system_design.md` with this section (already added above), then push:
+
+```bash
+git add notification_system_design.md priority_inbox.py
+git commit -m "feat: add Stage 6 Priority Inbox code and explanation"
+git push origin main
+```
+
+Then take screenshots of the output and push them too.
