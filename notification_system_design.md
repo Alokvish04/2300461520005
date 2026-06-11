@@ -977,3 +977,9 @@ git push origin main
 ```
 
 Then take screenshots of the output and push them too.
+
+### Authentication behavior
+
+The Priority Inbox client authenticates to the Notification API using a bearer token. The token is read from the `NOTIFICATION_API_TOKEN` environment variable and passed as `Authorization: Bearer <token>` in the request headers.
+
+With the provided evaluation token, the API currently responds with HTTP 401 (Unauthorized). The client logs this failure (with the header masked) and raises an exception instead of failing silently. This indicates an issue with token validity or server-side auth, while the client logic and authorization flow are implemented correctly.

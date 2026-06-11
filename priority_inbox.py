@@ -2,6 +2,7 @@ import requests
 from typing import List, Dict
 import datetime
 import logging
+import os
 
 # Simple logger setup to mimic structured logging / middleware usage
 def get_logger(name: str) -> logging.Logger:
@@ -15,6 +16,7 @@ def get_logger(name: str) -> logging.Logger:
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     return logger
+
 
 logger = get_logger("priority_inbox")
 
@@ -35,13 +37,31 @@ def get_type_weight(notification_type: str) -> int:
 def fetch_notifications(api_url: str) -> List[Dict]:
     """
     Fetch notifications from the API.
-    Uses logging for request tracing.
+    Uses logging for request tracing and bearer token auth.
     """
-    logger.info(f"Fetching notifications from API url={api_url}")
-    response = requests.get(api_url)
+    # Read bearer token from environment variable (DO NOT hard-code it)
+    access_token = os.getenv("NOTIFICATION_API_TOKEN")
+
+    headers = {}
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    # Log headers in a safe way (mask the token)
+    safe_headers = {
+        k: ("***" if k.lower() == "authorization" else v)
+        for k, v in headers.items()
+    }
+    logger.info(
+        "Fetching notifications from API "
+        f"url={api_url} has_token={bool(access_token)} headers={safe_headers}"
+    )
+
+    response = requests.get(api_url, headers=headers)
+
     if response.status_code != 200:
         logger.error(
-            f"API request failed status_code={response.status_code} url={api_url}"
+            "API request failed "
+            f"status_code={response.status_code} url={api_url}"
         )
         raise RuntimeError(f"API request failed with status {response.status_code}")
 
@@ -59,13 +79,13 @@ def compute_priority_score(notification: Dict) -> float:
 
     try:
         # Expecting ISO 8601, e.g. "2026-06-11T08:00:00Z" or without Z
-        # Strip trailing Z if present
         created_at_clean = created_at.rstrip("Z")
         dt = datetime.datetime.fromisoformat(created_at_clean)
         timestamp = dt.timestamp()
     except Exception as e:
         logger.warning(
-            f"Failed to parse createdAt createdAt={created_at} error={e}"
+            "Failed to parse createdAt "
+            f"createdAt={created_at} error={e}"
         )
         timestamp = 0.0
 
