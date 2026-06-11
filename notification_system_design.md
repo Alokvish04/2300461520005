@@ -1,6 +1,6 @@
 # Stage 1 – Notification REST API Design
 
-This document defines the REST APIs and real-time mechanism for a campus notification platform that delivers updates about Placements, Events, and Results to logged-in students.[page:1] The goal is to provide predictable endpoints, clear JSON contracts, and a simple real-time channel for the frontend.[page:1]
+This document defines the REST APIs and real-time mechanism for a campus notification platform that delivers updates about Placements, Events, and Results to logged-in students.
 
 ## Core Actions
 
@@ -14,7 +14,7 @@ This document defines the REST APIs and real-time mechanism for a campus notific
 
 ## REST API Endpoints
 
-Assumption: Users accessing the APIs are already authenticated by the platform, and the backend derives the current user from context or headers.[page:1]
+Assumption: Users accessing the APIs are already authenticated by the platform, and the backend derives the current user from context or headers.
 
 | Action                          | Method | Endpoint                             | Description                                      |
 |---------------------------------|--------|--------------------------------------|--------------------------------------------------|
@@ -28,7 +28,7 @@ Assumption: Users accessing the APIs are already authenticated by the platform, 
 
 ## Common Headers
 
-All APIs assume that the user is pre-authorised by the platform.[page:1]
+All APIs assume that the user is pre-authorised by the platform.
 
 - `Content-Type: application/json`
 - `Accept: application/json`
@@ -72,7 +72,7 @@ Creates a new notification that will be delivered to one or more target users or
 
 - `title` (string, required): Short title of the notification.
 - `message` (string, required): Detailed message to show to the user.
-- `type` (string, required): Category of notification, e.g., `PLACEMENT`, `EVENT`, `RESULT`.
+- `type` (string, required): Category of notification, e.g. `PLACEMENT`, `EVENT`, `RESULT`.
 - `target` (object, required): Target audience definition (department, batch, etc.).
 - `priority` (string, optional): `LOW`, `MEDIUM`, or `HIGH`.
 - `scheduledAt` (string, optional, ISO 8601): When to send, if scheduled.
@@ -234,7 +234,7 @@ Deletes (or hides) a notification for the current user (soft delete).
 
 ## Real-Time Notification Mechanism
 
-For real-time updates, the platform can use **Server-Sent Events (SSE)** to push notifications from the server to the browser over a long-lived HTTP connection.[page:1] Alternatively, a WebSocket endpoint can be used with the same payload structure.[page:1]
+For real-time updates, the platform can use **Server-Sent Events (SSE)** to push notifications from the server to the browser over a long-lived HTTP connection. Alternatively, a WebSocket endpoint can be used with the same payload structure.
 
 ### GET /notifications/stream (SSE)
 
@@ -272,7 +272,7 @@ If WebSockets are preferred, the client connects to a `/notifications/ws` endpoi
 
 # Stage 2 – Persistent Storage Design
 
-This section defines the database choice, schema, scaling concerns, and example queries for implementing the notification APIs defined in Stage 1.[page:1]
+This section defines the database choice, schema, scaling concerns, and example queries for implementing the notification APIs defined in Stage 1.
 
 ## Choice of Database
 
@@ -488,5 +488,4 @@ WHERE notification_id = :notification_id
   AND user_id = :user_id;
 ```
 
-These queries, combined with the schema and API design above, provide a complete end-to-end design for the notification platform required in Stage 1 and Stage 2.[page:1]
-```
+These queries, combined with the schema and API design above, provide a complete end-to-end design for the notification platform required in Stage 1 and Stage 2.
